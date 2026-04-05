@@ -1,0 +1,2 @@
+pydicom>=2.4
+watchdog>=3.0
