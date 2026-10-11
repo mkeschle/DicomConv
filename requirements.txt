@@ -1,2 +1,7 @@
-pydicom>=2.4
+pydicom>=2.4,<3
 watchdog>=3.0
+numpy>=1.24,<2
+Pillow>=10,<11
+
+# Optional: nur für smb://-Ziele in Dicom2jpgV1 (Modul smbclient)
+# smbprotocol>=1.10

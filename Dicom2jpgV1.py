@@ -1,6 +1,6 @@
-# FileNameConvV10.1.py
+# Dicom2jpgV1.py
 # -------------------------------------------------------------
-# Änderungen ggü. V9.1:
+# Änderungen ggü. FilenameConvV9.1:
 #   + Neue Prozedur: DicomTojpg()
 #     - Öffnet .dcm (DICOM) Dateien mit pydicom
 #     - Liest Patientendaten (Name, Vorname(n), PatID, Untersuchungsdatum/-zeit, Untersuchungstyp)
@@ -39,7 +39,12 @@ except Exception:
 # DICOM + Bild
 import numpy as np
 import pydicom
-from pydicom.pixel_data_handlers.util import apply_modality_lut, apply_voi_lut
+try:
+    # pydicom 3.x
+    from pydicom.pixels import apply_modality_lut, apply_voi_lut
+except ImportError:
+    # pydicom 2.4–2.x
+    from pydicom.pixel_data_handlers.util import apply_modality_lut, apply_voi_lut
 from PIL import Image
 
 # ------------------------------------------------------------------
@@ -50,7 +55,7 @@ logger: logging.Logger
 if "logger" in globals() and isinstance(globals()["logger"], logging.Logger):
     logger = globals()["logger"]
 else:
-    logger = logging.getLogger("FileNameConvV10.1")
+    logger = logging.getLogger("Docom2jpgV1.py")
     logger.setLevel(logging.INFO)
     _h = logging.StreamHandler(sys.stdout)
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))

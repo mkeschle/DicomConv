@@ -8,7 +8,7 @@ import sys
 import logging
 from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
-from FileNameConvV10.1 import DicomTojpg  # Neuer DICOM->JPG Support (V10.1)
+from Dicom2jpgV1 import DicomTojpg  # Neuer DICOM->JPG Support (V10.1)
 
 def email_senden(mail_text): 
     try:
