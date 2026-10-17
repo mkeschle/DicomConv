@@ -7,7 +7,7 @@
 #       PatID, Untersuchungsdatum/-zeit, Untersuchungstyp)
 #     - Konvertiert PixelData zu JPEG
 #     - Speichert JPG als:
-#       Vorname_Nachname_Geburtsdatum_Seite_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
+#       NAME_Vorname_Geburtsdatum_Seite_Bildtyp_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
 #     - Logging-Stil kompatibel: nutzt vorhandenen 'logger' & 'email_senden', falls im Projekt definiert;
 #       ansonsten werden sinnvolle Defaults gesetzt.
 #
@@ -166,6 +166,23 @@ def _extract_laterality(ds) -> str:
             return side
     return ""
 
+def _extract_image_type(ds) -> str:
+    """Nur der Bildtyp aus Image Type, z.B. COLOR. ORIGINAL/PRIMARY entfallen."""
+    raw = getattr(ds, "ImageType", None)
+    if not raw:
+        return ""
+    try:
+        values = list(raw)
+    except TypeError:
+        values = [raw]
+    parts = [_safe_text(value) for value in values]
+    if len(parts) >= 4 and parts[3]:
+        return parts[3]
+    for part in reversed(parts):
+        if part and part.upper() not in ("ORIGINAL", "PRIMARY"):
+            return part
+    return ""
+
 def _extract_patient_names(pn) -> Tuple[str, str]:
     """Zerlegt PatientName in (Nachname, Vorname(n))."""
     try:
@@ -270,17 +287,18 @@ def DicomTojpg(dcm_path: str,
     Öffnet eine .dcm-Datei, liest Patientendaten und speichert das Bild als JPEG.
 
     Gelesene Variablen (werden intern in gleichnamigen Variablen gehalten):
+      - name (Nachname, Grossbuchstaben)
       - vornamen (Vorname(n))
-      - name (Nachname)
       - geburtsdatum (YYYYMMDD, PatientBirthDate)
       - seite (OD oder OS)
+      - bildtyp (vierter Wert von Image Type, z.B. COLOR)
       - pat_id (Patienten-ID)
       - untersuchungsdatum (YYYYMMDD)
       - untersuchungszeit (HHMMSS)
       - untersuchungstyp
 
     Der Ziel-Dateiname lautet:
-      Vorname_Nachname_Geburtsdatum_Seite_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
+      NAME_Vorname_Geburtsdatum_Seite_Bildtyp_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
 
     Rückgabe:
       Pfad/URL zur geschriebenen JPEG-Datei oder None bei Fehler.
@@ -294,14 +312,18 @@ def DicomTojpg(dcm_path: str,
         # --- Patientendaten extrahieren ---
         pn = getattr(ds, "PatientName", "")
         name, vornamen = _extract_patient_names(pn)
+        name = name.upper()
 
         pat_id = _safe_text(getattr(ds, "PatientID", ""))
         geburtsdatum = _fmt_date_or_empty(getattr(ds, "PatientBirthDate", None))
         seite = _extract_laterality(ds)
+        bildtyp = _extract_image_type(ds)
         if not geburtsdatum:
             logger.warning("Kein Geburtsdatum in %s", dcm_path)
         if not seite:
             logger.warning("Keine Augenseite (OD/OS) in %s", dcm_path)
+        if not bildtyp:
+            logger.warning("Kein Bildtyp in %s", dcm_path)
 
         study_date = (getattr(ds, "StudyDate", None) or
                       getattr(ds, "AcquisitionDate", None) or
@@ -323,7 +345,7 @@ def DicomTojpg(dcm_path: str,
 
         # --- Dateiname nach Vorgabe ---
         parts = [
-            vornamen, name, geburtsdatum, seite, untersuchungstyp,
+            name, vornamen, geburtsdatum, seite, bildtyp, untersuchungstyp,
             untersuchungsdatum, untersuchungszeit, pat_id
         ]
         base = "_".join([p for p in parts if p]).strip("_")
