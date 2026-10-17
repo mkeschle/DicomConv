@@ -1,12 +1,13 @@
-# Dicom2jpgV1.py
+# FileNameConvV10.1.py
 # -------------------------------------------------------------
-# Änderungen ggü. FilenameConvV9.1:
+# Änderungen ggü. V9.1:
 #   + Neue Prozedur: DicomTojpg()
 #     - Öffnet .dcm (DICOM) Dateien mit pydicom
-#     - Liest Patientendaten (Name, Vorname(n), PatID, Untersuchungsdatum/-zeit, Untersuchungstyp)
+#     - Liest Patientendaten (Vorname, Nachname, Geburtsdatum, Seite OD/OS,
+#       PatID, Untersuchungsdatum/-zeit, Untersuchungstyp)
 #     - Konvertiert PixelData zu JPEG
 #     - Speichert JPG als:
-#       Name_Vorname(n)_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
+#       Vorname_Nachname_Geburtsdatum_Seite_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
 #     - Logging-Stil kompatibel: nutzt vorhandenen 'logger' & 'email_senden', falls im Projekt definiert;
 #       ansonsten werden sinnvolle Defaults gesetzt.
 #
@@ -29,6 +30,12 @@ import logging
 import datetime as dt
 from typing import Optional, Tuple
 
+# NumPy 1.24 bringt OpenBLAS mit. Auf diesem Mac läuft gemm_thread_n
+# über den Thread-Stack hinaus und Python stirbt mit SIGSEGV beim Import.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("GOTO_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 # Optional: SMB-Unterstützung nur, wenn Ziel mit "smb://" beginnt
 try:
     import smbclient  # pip install smbprotocol
@@ -41,10 +48,14 @@ import numpy as np
 import pydicom
 try:
     # pydicom 3.x
-    from pydicom.pixels import apply_modality_lut, apply_voi_lut
+    from pydicom.pixels import apply_modality_lut, apply_voi_lut, convert_color_space
 except ImportError:
     # pydicom 2.4–2.x
-    from pydicom.pixel_data_handlers.util import apply_modality_lut, apply_voi_lut
+    from pydicom.pixel_data_handlers.util import (
+        apply_modality_lut,
+        apply_voi_lut,
+        convert_color_space,
+    )
 from PIL import Image
 
 # ------------------------------------------------------------------
@@ -55,7 +66,7 @@ logger: logging.Logger
 if "logger" in globals() and isinstance(globals()["logger"], logging.Logger):
     logger = globals()["logger"]
 else:
-    logger = logging.getLogger("Docom2jpgV1.py")
+    logger = logging.getLogger("FileNameConvV10.1")
     logger.setLevel(logging.INFO)
     _h = logging.StreamHandler(sys.stdout)
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -113,6 +124,48 @@ def _fmt_time_hhmmss(t: Optional[str]) -> str:
         return tonly[:6]
     return (tonly + "000000")[:6]
 
+def _fmt_date_or_empty(d: Optional[str]) -> str:
+    """Formatiert ein DICOM-Datum als YYYYMMDD. Leer, wenn keins vorhanden ist."""
+    if not d:
+        return ""
+    donly = "".join(ch for ch in str(d) if ch.isdigit())
+    if len(donly) >= 8:
+        return donly[:8]
+    return ""
+
+def _to_od_os(value) -> str:
+    """Wandelt DICOM-Seite (R/L oder Text) in OD oder OS."""
+    if value is None:
+        return ""
+    text = str(value).strip().upper()
+    if text in ("R", "RIGHT", "OD", "RECHTS"):
+        return "OD"
+    if text in ("L", "LEFT", "OS", "LINKS"):
+        return "OS"
+    tokens = [part for part in "".join(ch if ch.isalnum() else " " for ch in text).split() if part]
+    if "OD" in tokens or "RIGHT" in tokens or "RECHTS" in tokens:
+        return "OD"
+    if "OS" in tokens or "LEFT" in tokens or "LINKS" in tokens:
+        return "OS"
+    return ""
+
+def _extract_laterality(ds) -> str:
+    """Liest die Augenseite. R wird OD, L wird OS."""
+    keywords = ("ImageLaterality", "Laterality", "FrameLaterality")
+    try:
+        for elem in ds.iterall():
+            if elem.keyword in keywords and elem.value not in (None, ""):
+                side = _to_od_os(elem.value)
+                if side:
+                    return side
+    except Exception:
+        pass
+    for attr in ("SeriesDescription", "StudyDescription", "ProtocolName", "ImageComments"):
+        side = _to_od_os(getattr(ds, attr, ""))
+        if side:
+            return side
+    return ""
+
 def _extract_patient_names(pn) -> Tuple[str, str]:
     """Zerlegt PatientName in (Nachname, Vorname(n))."""
     try:
@@ -139,8 +192,21 @@ def _dicom_to_pil(ds: pydicom.dataset.FileDataset) -> Image.Image:
     if "PixelData" not in ds:
         raise ValueError("DICOM enthält keine PixelData.")
     arr = ds.pixel_array
+    photometric = str(getattr(ds, "PhotometricInterpretation", "")).upper()
+    samples = int(getattr(ds, "SamplesPerPixel", 1) or 1)
 
-    # LUTs anwenden, wenn vorhanden
+    # JPEG-Fundus von Cirrus bleibt nach dem Dekodieren YBR_FULL_422.
+    # Als RGB gespeichert wirkt das grün-violett statt orange.
+    if samples == 3 and photometric in ("YBR_FULL", "YBR_FULL_422"):
+        arr = convert_color_space(arr, photometric, "RGB")
+        arr = np.clip(arr, 0, 255).astype("uint8")
+        return Image.fromarray(arr, mode="RGB")
+
+    if samples == 3:
+        arr = np.clip(arr, 0, 255).astype("uint8")
+        return Image.fromarray(arr, mode="RGB")
+
+    # Graustufen: LUT und Spreizung auf 8 Bit
     try:
         arr = apply_modality_lut(arr, ds)
     except Exception:
@@ -150,21 +216,15 @@ def _dicom_to_pil(ds: pydicom.dataset.FileDataset) -> Image.Image:
     except Exception:
         pass
 
-    # MONOCHROME1 invertieren
-    photometric = str(getattr(ds, "PhotometricInterpretation", "")).upper()
     if photometric == "MONOCHROME1":
         arr = arr.max() - arr
 
-    # auf 8-bit normalisieren
     arr = arr.astype("float32")
     min_v, max_v = float(arr.min()), float(arr.max())
     if max_v > min_v:
         arr = (arr - min_v) / (max_v - min_v) * 255.0
     arr = np.clip(arr, 0, 255).astype("uint8")
-
-    samples = int(getattr(ds, "SamplesPerPixel", 1) or 1)
-    mode = "RGB" if samples == 3 else "L"
-    return Image.fromarray(arr, mode=mode)
+    return Image.fromarray(arr, mode="L")
 
 def _ensure_local_dir(path: str) -> None:
     if path.startswith("smb://"):
@@ -210,15 +270,17 @@ def DicomTojpg(dcm_path: str,
     Öffnet eine .dcm-Datei, liest Patientendaten und speichert das Bild als JPEG.
 
     Gelesene Variablen (werden intern in gleichnamigen Variablen gehalten):
-      - name (Nachname)
       - vornamen (Vorname(n))
+      - name (Nachname)
+      - geburtsdatum (YYYYMMDD, PatientBirthDate)
+      - seite (OD oder OS)
       - pat_id (Patienten-ID)
       - untersuchungsdatum (YYYYMMDD)
       - untersuchungszeit (HHMMSS)
       - untersuchungstyp
 
     Der Ziel-Dateiname lautet:
-      Name_Vorname(n)_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
+      Vorname_Nachname_Geburtsdatum_Seite_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
 
     Rückgabe:
       Pfad/URL zur geschriebenen JPEG-Datei oder None bei Fehler.
@@ -234,6 +296,12 @@ def DicomTojpg(dcm_path: str,
         name, vornamen = _extract_patient_names(pn)
 
         pat_id = _safe_text(getattr(ds, "PatientID", ""))
+        geburtsdatum = _fmt_date_or_empty(getattr(ds, "PatientBirthDate", None))
+        seite = _extract_laterality(ds)
+        if not geburtsdatum:
+            logger.warning("Kein Geburtsdatum in %s", dcm_path)
+        if not seite:
+            logger.warning("Keine Augenseite (OD/OS) in %s", dcm_path)
 
         study_date = (getattr(ds, "StudyDate", None) or
                       getattr(ds, "AcquisitionDate", None) or
@@ -255,7 +323,7 @@ def DicomTojpg(dcm_path: str,
 
         # --- Dateiname nach Vorgabe ---
         parts = [
-            name, vornamen, untersuchungstyp,
+            vornamen, name, geburtsdatum, seite, untersuchungstyp,
             untersuchungsdatum, untersuchungszeit, pat_id
         ]
         base = "_".join([p for p in parts if p]).strip("_")
