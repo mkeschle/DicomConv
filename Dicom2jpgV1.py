@@ -5,9 +5,10 @@
 #     - Öffnet .dcm (DICOM) Dateien mit pydicom
 #     - Liest Patientendaten (Vorname, Nachname, Geburtsdatum, Seite OD/OS,
 #       PatID, Untersuchungsdatum/-zeit, Untersuchungstyp)
-#     - Konvertiert PixelData zu JPEG
-#     - Speichert JPG als:
-#       NAME_Vorname_Geburtsdatum_Seite_Bildtyp_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
+#     - Konvertiert PixelData zu PDF
+#     - Speichert PDF als:
+#       NAME_Vorname_Geburtsdatum_Seite_Bildtyp_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.pdf
+#       Panorama: Bildtyp COLOR_PANORAMA, Einzelaufnahme: COLOR
 #     - Logging-Stil kompatibel: nutzt vorhandenen 'logger' & 'email_senden', falls im Projekt definiert;
 #       ansonsten werden sinnvolle Defaults gesetzt.
 #
@@ -167,7 +168,7 @@ def _extract_laterality(ds) -> str:
     return ""
 
 def _extract_image_type(ds) -> str:
-    """Nur der Bildtyp aus Image Type, z.B. COLOR. ORIGINAL/PRIMARY entfallen."""
+    """COLOR für Einzelaufnahmen, COLOR_PANORAMA für Panoramen (DICOM: MONTAGE)."""
     raw = getattr(ds, "ImageType", None)
     if not raw:
         return ""
@@ -177,11 +178,16 @@ def _extract_image_type(ds) -> str:
         values = [raw]
     parts = [_safe_text(value) for value in values]
     if len(parts) >= 4 and parts[3]:
-        return parts[3]
-    for part in reversed(parts):
-        if part and part.upper() not in ("ORIGINAL", "PRIMARY"):
-            return part
-    return ""
+        kind = parts[3]
+    else:
+        kind = ""
+        for part in reversed(parts):
+            if part and part.upper() not in ("ORIGINAL", "PRIMARY", "DERIVED", "MONTAGE"):
+                kind = part
+                break
+    if any(part.upper() == "MONTAGE" for part in parts):
+        return f"{kind}_PANORAMA" if kind else "PANORAMA"
+    return kind
 
 def _extract_patient_names(pn) -> Tuple[str, str]:
     """Zerlegt PatientName in (Nachname, Vorname(n))."""
@@ -284,24 +290,24 @@ def _write_bytes(dest_path: str, data: bytes) -> None:
 def DicomTojpg(dcm_path: str,
                out_dir: Optional[str] = None) -> Optional[str]:
     """
-    Öffnet eine .dcm-Datei, liest Patientendaten und speichert das Bild als JPEG.
+    Öffnet eine .dcm-Datei, liest Patientendaten und speichert das Bild als PDF.
 
     Gelesene Variablen (werden intern in gleichnamigen Variablen gehalten):
       - name (Nachname, Grossbuchstaben)
       - vornamen (Vorname(n))
       - geburtsdatum (YYYYMMDD, PatientBirthDate)
       - seite (OD oder OS)
-      - bildtyp (vierter Wert von Image Type, z.B. COLOR)
+      - bildtyp (COLOR oder COLOR_PANORAMA)
       - pat_id (Patienten-ID)
       - untersuchungsdatum (YYYYMMDD)
       - untersuchungszeit (HHMMSS)
       - untersuchungstyp
 
     Der Ziel-Dateiname lautet:
-      NAME_Vorname_Geburtsdatum_Seite_Bildtyp_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.jpg
+      NAME_Vorname_Geburtsdatum_Seite_Bildtyp_Untersuchungstyp_Untersuchungsdatum_Untersuchungszeit_PatID.pdf
 
     Rückgabe:
-      Pfad/URL zur geschriebenen JPEG-Datei oder None bei Fehler.
+      Pfad/URL zur geschriebenen PDF-Datei oder None bei Fehler.
     """
     try:
         dcm_path = os.path.abspath(dcm_path)
@@ -349,16 +355,18 @@ def DicomTojpg(dcm_path: str,
             untersuchungsdatum, untersuchungszeit, pat_id
         ]
         base = "_".join([p for p in parts if p]).strip("_")
-        filename = f"{base}.jpg"
+        filename = f"{base}.pdf"
 
         # --- Zielpfad bestimmen ---
         out_base = (out_dir or CIRRUS_BILDERGALERIE_OUT).rstrip("/")
         dest_path = (f"{out_base}/{filename}" if out_base.startswith("smb://")
                      else os.path.join(out_base, filename))
 
-        # --- JPEG schreiben ---
+        # --- PDF schreiben ---
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=95, optimize=True)
+        img.save(buf, format="PDF", resolution=150.0)
         _write_bytes(dest_path, buf.getvalue())
 
         logger.info("DicomTojpg erfolgreich: %s", dest_path)
